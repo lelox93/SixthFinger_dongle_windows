@@ -97,7 +97,7 @@ def main():
     udp_thread = threading.Thread(target=udp_command_listener, daemon=True)
     udp_thread.start()
 
-    loop_delay = 0.03  # Loop ~33 Hz
+    loop_delay = 0.01  # Loop ~33 Hz TODO: Modifica i tempi non vengono rispettati
 
     while True:
         # Se è cambiato lo stato (ricevuto via UDP), invia il comando corrispondente al dongle
@@ -139,7 +139,7 @@ def main():
                     buffer.extend(data)
                     last_valid_buffer = bytes(buffer)
                     buffer_valid = True
-                    print("Ricevuto buffer:", buffer)
+                    # print("Ricevuto buffer:", buffer)
                     process_buffer(buffer, udp_sock)
                 else:
                     # Se non ci sono abbastanza byte, usa l'ultimo buffer valido
