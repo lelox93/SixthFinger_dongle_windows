@@ -40,7 +40,7 @@ if sys.platform == "win32":
     wm_info = pygame.display.get_wm_info()
     hwnd = wm_info.get("window")
     if hwnd:
-        corner_radius = 30  # Raggio in pixel della finestra finale
+        corner_radius = 30  # Raggio in pixel della finestra finale (non scalato)
         rgn = ctypes.windll.gdi32.CreateRoundRectRgn(0, 0, WIDTH, HEIGHT, corner_radius, corner_radius)
         ctypes.windll.user32.SetWindowRgn(hwnd, rgn, True)
 
@@ -48,10 +48,10 @@ if sys.platform == "win32":
 # Definizione colori e stili (Apple-like)
 # -------------------------
 BACKGROUND_COLOR = (245, 245, 245)       # Grigio chiaro
-# Nuovo color scheme per i bottoni: sfondo blu #8080FF, hover e pressed leggermente più scuri
+# Bottoni: sfondo blu #8080FF, hover e pressed leggermente più scuri, testo bianco
 BUTTON_COLOR = (128, 128, 255)           # #8080FF
-BUTTON_HOVER_COLOR = (112, 112, 223)       # leggermente più scuro
-BUTTON_PRESSED_COLOR = (96, 96, 192)       # ancora più scuro
+BUTTON_HOVER_COLOR = (112, 112, 223)
+BUTTON_PRESSED_COLOR = (96, 96, 192)
 BORDER_COLOR = (160, 160, 160)
 TEXT_COLOR = (255, 255, 255)             # Bianco
 SHADOW_COLOR = (200, 200, 200)
@@ -68,7 +68,7 @@ open_button_rect = pygame.Rect(R_WIDTH - button_width - padding, (R_HEIGHT // 3)
 # -------------------------
 # Window Controls in stile macOS (solo controlli rosso e giallo)
 # -------------------------
-# Riduci i cerchi e spostali di più dall'angolo
+# Cerchi più piccoli e spostati più dall'angolo
 CONTROL_RADIUS = 8 * SUPERSAMPLE
 CONTROL_GAP = 10 * SUPERSAMPLE
 control_red_center = (20 * SUPERSAMPLE, 20 * SUPERSAMPLE)
@@ -89,7 +89,7 @@ def draw_window_controls(surface):
 
 def handle_window_controls_event(event):
     if event.type == pygame.MOUSEBUTTONUP:
-        # Convertiamo le coordinate per il render_surface
+        # Per i controlli, convertiamo le coordinate dell'evento in quelle del render_surface
         pos = (event.pos[0] * SUPERSAMPLE, event.pos[1] * SUPERSAMPLE)
         if is_point_in_circle(pos, control_red_center, CONTROL_RADIUS):
             pygame.quit()
@@ -155,10 +155,18 @@ def set_window_pos(x, y):
         ctypes.windll.user32.SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER)
 
 # -------------------------
-# Font Apple-like
+# Font Apple-like (con font embeddato)
 # -------------------------
+import sys, os
+def resource_path(relative_path):
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
 try:
-    font = pygame.font.Font("SF-Pro-Display-Regular.otf", 28 * SUPERSAMPLE)
+    font = pygame.font.Font(resource_path("SF-Pro-Display-Regular.otf"), 28 * SUPERSAMPLE)
 except Exception as e:
     print("Errore nel caricamento del font:", e)
     font = pygame.font.SysFont("Arial", 28 * SUPERSAMPLE)
@@ -202,7 +210,7 @@ def udp_feedback_listener():
             print("Errore nel listener UDP feedback:", e)
 
 def draw_graph(surface):
-    # Area grafico: più alto, posizionato più in basso
+    # Area grafico: più alto e posizionato più in basso
     graph_rect = pygame.Rect(padding, R_HEIGHT - 140, R_WIDTH - 2 * padding, 120)
     draw_aa_rounded_rect(surface, graph_rect, (255, 255, 255), 10 * SUPERSAMPLE)
     pygame.draw.rect(surface, BORDER_COLOR, graph_rect, 2, border_radius=10 * SUPERSAMPLE)
@@ -218,7 +226,6 @@ def draw_graph(surface):
     for i, value in enumerate(data):
         clamped = max(min_val, min(value, max_val))
         x = graph_rect.left + (i / (max_data_points - 1)) * graph_rect.width
-        # Uso margini interni ridotti per far sì che la linea si estenda quasi fino ai bordi arrotondati
         y = graph_rect.bottom - 5 * SUPERSAMPLE - ((clamped - min_val) / (max_val - min_val)) * (graph_rect.height - 10 * SUPERSAMPLE)
         points.append((int(x), int(y)))
     
@@ -240,7 +247,7 @@ def main():
         render_surface.fill(BACKGROUND_COLOR)
         draw_window_controls(render_surface)
 
-        mouse_pos = pygame.mouse.get_pos()  # Coordinate della finestra finale
+        mouse_pos = pygame.mouse.get_pos()  # Coordinate della finestra finale (non scalate)
         mouse_pressed = pygame.mouse.get_pressed()[0]
 
         for event in pygame.event.get():
@@ -252,6 +259,7 @@ def main():
 
             if event.type == pygame.MOUSEBUTTONUP:
                 dragging = False
+                # Per i pulsanti, convertiamo le coordinate per il render_surface
                 scaled_pos = (event.pos[0] * SUPERSAMPLE, event.pos[1] * SUPERSAMPLE)
                 if close_button_rect.collidepoint(scaled_pos):
                     send_command("CLOSE")
@@ -259,19 +267,14 @@ def main():
                     send_command("OPEN")
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                # Per collisioni, usiamo le coordinate scalate; per il drag usiamo quelle originali
                 scaled_pos = (event.pos[0] * SUPERSAMPLE, event.pos[1] * SUPERSAMPLE)
                 if not (close_button_rect.collidepoint(scaled_pos) or 
                         open_button_rect.collidepoint(scaled_pos) or
                         is_point_in_circle(scaled_pos, control_red_center, CONTROL_RADIUS) or
                         is_point_in_circle(scaled_pos, control_yellow_center, CONTROL_RADIUS)):
-                    global_cursor = get_cursor_pos()
-                    # Ottieni la posizione corrente della finestra
-                    def get_window_rect():
-                        rect = ctypes.wintypes.RECT()
-                        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                        return (rect.left, rect.top)
-                    window_pos = get_window_rect()
-                    drag_offset = (global_cursor[0] - window_pos[0], global_cursor[1] - window_pos[1])
+                    # Usa event.pos (non scalato) per il drag
+                    drag_offset = event.pos
                     dragging = True
 
             if event.type == pygame.MOUSEMOTION and dragging and sys.platform == "win32":
@@ -280,6 +283,7 @@ def main():
                 new_y = global_cursor[1] - drag_offset[1]
                 set_window_pos(new_x, new_y)
 
+        # Per i pulsanti, usiamo le coordinate scalate
         scaled_mouse_pos = (mouse_pos[0] * SUPERSAMPLE, mouse_pos[1] * SUPERSAMPLE)
         close_hover = close_button_rect.collidepoint(scaled_mouse_pos)
         open_hover = open_button_rect.collidepoint(scaled_mouse_pos)

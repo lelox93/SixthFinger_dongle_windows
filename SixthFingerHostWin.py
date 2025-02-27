@@ -4,6 +4,8 @@ from serial.threaded import ReaderThread, Protocol
 import threading
 import time
 from COMDeviceManager import COMDeviceManager  # Assicurati che il modulo sia nel PYTHONPATH
+from colorama import init, Fore, Style
+init()
 
 # Impostazioni UDP
 UDP_IP = "127.0.0.1"
@@ -56,7 +58,9 @@ def process_packet(packet, udp_sock):
         print("Errore nel processing del pacchetto:", e)
         return
 
-    print(f"Torque: {torque_val} - Position: {position_val}")
+    print(f"\r{Fore.LIGHTGREEN_EX}Torque: {torque_val} - Position: {position_val}{Style.RESET_ALL}\033[K", end="")
+
+
     # Costruisce il messaggio includendo entrambi i valori
     message = f"{torque_val} {position_val}"
     try:
