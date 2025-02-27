@@ -1,8 +1,9 @@
 import socket
 import serial
+from serial.threaded import ReaderThread, Protocol
 import threading
 import time
-from COMDeviceManager import COMDeviceManager  # Assicurati che COMDeviceManager.py sia nel PYTHONPATH
+from COMDeviceManager import COMDeviceManager  # Assicurati che il modulo sia nel PYTHONPATH
 
 # Impostazioni UDP
 UDP_IP = "127.0.0.1"
@@ -14,70 +15,93 @@ current_state_string = ""
 state_changed = False
 state_lock = threading.Lock()
 
-# Variabili per la gestione del buffer seriale
-last_valid_buffer = b'\0' * 12
-buffer_valid = False
-
 def udp_command_listener():
     """
     Thread che ascolta i comandi UDP su UDP_CMD_PORT.
     I messaggi attesi sono stringhe come "CLOSE", "STOP" o "OPEN".
     """
-    global current_state_string, state_changed
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((UDP_IP, UDP_CMD_PORT))
     print(f"Ascolto comandi UDP su {UDP_IP}:{UDP_CMD_PORT}")
     while True:
-        data, addr = sock.recvfrom(1024)
-        cmd = data.decode('utf-8').strip()
-        with state_lock:
-            current_state_string = cmd
-            state_changed = True
-        print(f"Ricevuto comando UDP: {cmd}")
+        try:
+            data, addr = sock.recvfrom(1024)
+            cmd = data.decode('utf-8').strip()
+            with state_lock:
+                global current_state_string, state_changed
+                current_state_string = cmd
+                state_changed = True
+            print(f"Ricevuto comando UDP: {cmd}")
+        except Exception as e:
+            print("Errore nel listener UDP:", e)
 
-def process_buffer(buffer, udp_sock):
+def process_packet(packet, udp_sock):
     """
-    Estrae torque e position dal buffer e invia i valori tramite UDP.
-    Il buffer è atteso nel formato: 
+    Elabora un pacchetto (assunto lungo 11 byte, inizio con '$')
+    ed estrae torque e position per poi inviarli via UDP.
+    Formato atteso:
       index 0: '$'
       index 1-3: cifre del torque
-      index 6-8: cifre della position
+      index 5-7: cifre della position
     """
     try:
-        torque_val = ((buffer[1] - ord('0')) * 100 +
-                      (buffer[2] - ord('0')) * 10 +
-                      (buffer[3] - ord('0')))
-        position_val = ((buffer[6] - ord('0')) * 100 +
-                        (buffer[7] - ord('0')) * 10 +
-                        (buffer[8] - ord('0')))
+        torque_val = ((packet[1] - ord('0')) * 100 +
+                      (packet[2] - ord('0')) * 10 +
+                      (packet[3] - ord('0')))
+        # Legge il valore di position dagli indici 5,6,7
+        position_val = ((packet[5] - ord('0')) * 100 +
+                        (packet[6] - ord('0')) * 10 +
+                        (packet[7] - ord('0')))
     except Exception as e:
-        print("Errore nel processing del buffer:", e)
+        print("Errore nel processing del pacchetto:", e)
         return
 
-    # Invia i valori via UDP (qui li inviamo separatamente; puoi combinare i messaggi se preferisci)
-    msg_torque = f"{torque_val}"
-    msg_position = f"{position_val}"
-    udp_sock.sendto(msg_torque.encode('utf-8'), (UDP_IP, UDP_FEEDBACK_PORT))
     print(f"Torque: {torque_val} - Position: {position_val}")
+    # Costruisce il messaggio includendo entrambi i valori
+    message = f"{torque_val} {position_val}"
+    try:
+        udp_sock.sendto(message.encode(), (UDP_IP, UDP_FEEDBACK_PORT))
+    except Exception as e:
+        print("Errore nell'invio UDP:", e)
 
-def flush_serial_port(ser):
-    """ Esegue il flush della porta seriale leggendo e scartando i byte disponibili """
-    while ser.in_waiting:
-        ser.read(ser.in_waiting)
+class SerialProtocol(Protocol):
+    """
+    Protocollo per ReaderThread che accumula i dati in un buffer.
+    Quando trova un pacchetto completo (11 byte che iniziano con '$'),
+    lo passa alla callback `packet_callback`.
+    """
+    def __init__(self, packet_callback, packet_length=11, start_byte=b'$'):
+        self.packet_callback = packet_callback
+        self.packet_length = packet_length
+        self.start_byte = start_byte
+        self.buffer = bytearray()
+
+    def data_received(self, data):
+        self.buffer.extend(data)
+        while True:
+            start_index = self.buffer.find(self.start_byte)
+            if start_index == -1:
+                if len(self.buffer) > 1024:
+                    self.buffer.clear()
+                break
+            if len(self.buffer) < start_index + self.packet_length:
+                break
+            packet = self.buffer[start_index:start_index+self.packet_length]
+            del self.buffer[:start_index+self.packet_length]
+            self.packet_callback(packet)
 
 def set_velocity_cmd(ser):
-    """ Invia il comando di velocità "$VS***" alla porta seriale """
+    """Invia il comando di velocità '$VS***' alla porta seriale."""
     data = b"$VS***"
     print("Invio comando di velocità:", data)
-    ser.write(data)
+    try:
+        ser.write(data)
+    except Exception as e:
+        print("Errore nell'invio del comando di velocità:", e)
 
 def main():
-    global state_changed, current_state_string, last_valid_buffer, buffer_valid
-
-    # Imposta il socket UDP per l'invio dei feedback
     udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    # Utilizza COMDeviceManager per cercare la porta COM associata al dongle "robot"
     dongle_type = "robot"  # Può essere "feedback", "input" o "robot"
     comport = COMDeviceManager.discover_com_devices(dongle_type)
     if not comport:
@@ -89,67 +113,58 @@ def main():
         return
     print("Porta seriale aperta correttamente:", comport)
 
-    # Flush iniziale e invio comando di velocità
-    flush_serial_port(ser)
+    try:
+        while ser.in_waiting:
+            ser.read(ser.in_waiting)
+    except Exception as e:
+        print("Errore nel flush della porta seriale:", e)
     set_velocity_cmd(ser)
 
-    # Avvia il thread per ricevere comandi UDP
     udp_thread = threading.Thread(target=udp_command_listener, daemon=True)
     udp_thread.start()
 
-    loop_delay = 0.01  # Loop ~33 Hz TODO: Modifica i tempi non vengono rispettati
+    def packet_callback(packet):
+        process_packet(packet, udp_sock)
 
-    while True:
-        # Se è cambiato lo stato (ricevuto via UDP), invia il comando corrispondente al dongle
-        if state_changed:
-            with state_lock:
-                cmd = current_state_string
-                state_changed = False
-            data = bytearray(7)
-            data[0] = ord('$')
-            if cmd == "CLOSE":
-                data[1] = ord('C')
-            elif cmd == "STOP":
-                data[1] = ord('S')
-            elif cmd == "OPEN":
-                data[1] = ord('O')
-            else:
-                print("Comando sconosciuto ricevuto:", cmd)
-                continue
-            for i in range(2, 6):
-                data[i] = ord('*')
-            # Simula un terminatore nullo non inviato (invia data[0]..data[5])
-            ser.write(data[:-1])
-            print("Comando inviato al dongle:", data[:-1].decode('ascii', errors='ignore'))
-
-        # Gestione della lettura dalla porta seriale
-        if ser.in_waiting > 0:
-            # Cerca il byte di inizio '$'
-            start_byte_found = False
-            while ser.in_waiting:
-                byte = ser.read(1)
-                if byte == b'$':
-                    start_byte_found = True
-                    buffer = bytearray(b'$')
-                    break
-            if start_byte_found:
-                # Attendi 10 byte aggiuntivi
-                if ser.in_waiting >= 10:
-                    data = ser.read(10)
-                    buffer.extend(data)
-                    last_valid_buffer = bytes(buffer)
-                    buffer_valid = True
-                    # print("Ricevuto buffer:", buffer)
-                    process_buffer(buffer, udp_sock)
-                else:
-                    # Se non ci sono abbastanza byte, usa l'ultimo buffer valido
-                    if buffer_valid:
-                        process_buffer(last_valid_buffer, udp_sock)
-
-        time.sleep(loop_delay)
-
-    ser.close()
-    print("Porta seriale chiusa.")
+    with ReaderThread(ser, lambda: SerialProtocol(packet_callback)) as protocol:
+        loop_delay = 0.03  # 33 Hz ~ 30 ms per ciclo
+        try:
+            while True:
+                cycle_start = time.perf_counter()
+                global current_state_string, state_changed
+                if state_changed:
+                    with state_lock:
+                        cmd = current_state_string
+                        state_changed = False
+                    data = bytearray(7)
+                    data[0] = ord('$')
+                    if cmd == "CLOSE":
+                        data[1] = ord('C')
+                    elif cmd == "STOP":
+                        data[1] = ord('S')
+                    elif cmd == "OPEN":
+                        data[1] = ord('O')
+                    else:
+                        print("Comando sconosciuto ricevuto:", cmd)
+                        continue
+                    for i in range(2, 6):
+                        data[i] = ord('*')
+                    try:
+                        ser.write(data[:-1])
+                        print("Comando inviato al dongle:", data[:-1].decode('ascii', errors='ignore'))
+                    except Exception as e:
+                        print("Errore nell'invio del comando sulla porta seriale:", e)
+                elapsed = time.perf_counter() - cycle_start
+                remaining_time = loop_delay - elapsed
+                if remaining_time > 0:
+                    time.sleep(remaining_time)
+        except KeyboardInterrupt:
+            print("Terminazione tramite KeyboardInterrupt.")
+        except Exception as e:
+            print("Errore nel loop principale:", e)
+        finally:
+            udp_sock.close()
+            print("Chiusura dell'endpoint UDP.")
 
 if __name__ == "__main__":
     main()
